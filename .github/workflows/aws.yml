@@ -1,0 +1,73 @@
+name: Deploy API To AWS
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.AWS_ECR_REPOSITORY }}
+  ECS_CLUSTER: ${{ vars.AWS_ECS_CLUSTER }}
+  ECS_SERVICE: ${{ vars.AWS_ECS_SERVICE }}
+  ECS_TASK_DEFINITION: ${{ vars.AWS_ECS_TASK_DEFINITION_PATH }}
+  ECS_CONTAINER_NAME: ${{ vars.AWS_ECS_CONTAINER_NAME }}
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy API
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required variables
+        run: |
+          test -n "${AWS_REGION}" || (echo "Missing repo variable: AWS_REGION" && exit 1)
+          test -n "${ECR_REPOSITORY}" || (echo "Missing repo variable: AWS_ECR_REPOSITORY" && exit 1)
+          test -n "${ECS_CLUSTER}" || (echo "Missing repo variable: AWS_ECS_CLUSTER" && exit 1)
+          test -n "${ECS_SERVICE}" || (echo "Missing repo variable: AWS_ECS_SERVICE" && exit 1)
+          test -n "${ECS_TASK_DEFINITION}" || (echo "Missing repo variable: AWS_ECS_TASK_DEFINITION_PATH" && exit 1)
+          test -n "${ECS_CONTAINER_NAME}" || (echo "Missing repo variable: AWS_ECS_CONTAINER_NAME" && exit 1)
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}" .
+          docker push "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          echo "image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Render ECS task definition
+        id: render-task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.ECS_TASK_DEFINITION }}
+          container-name: ${{ env.ECS_CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
